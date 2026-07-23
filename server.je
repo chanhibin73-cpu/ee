@@ -1,0 +1,153 @@
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
+
+app.use(express.static('public')); // public フォルダ配下の HTML を配信
+
+const rooms = {};
+
+io.on('connection', (socket) => {
+  // 部屋への参加
+  socket.on('joinRoom', ({ roomId, playerName }) => {
+    socket.join(roomId);
+
+    if (!rooms[roomId]) {
+      rooms[roomId] = {
+        id: roomId,
+        players: [], // 参加プレイヤー
+        started: false,
+        currentTurn: 0,
+        timer: null
+      };
+    }
+
+    const room = rooms[roomId];
+
+    if (room.players.length < 4 && !room.started) {
+      const seat = room.players.length;
+      const player = {
+        id: socket.id,
+        name: playerName || `プレイヤー${seat + 1}`,
+        seat: seat,
+        isCpu: false
+      };
+      room.players.push(player);
+
+      socket.emit('assignedSeat', { seat: seat, roomId: roomId });
+
+      io.to(roomId).emit('roomUpdate', {
+        playerCount: room.players.length,
+        players: room.players
+      });
+
+      // 4人揃ったら自動開始
+      if (room.players.length === 4) {
+        startMatch(roomId);
+      }
+    } else {
+      socket.emit('roomFull');
+    }
+  });
+
+  // 人数が揃わない場合、CPUを入れて即時開始するイベント
+  socket.on('startWithCpu', ({ roomId }) => {
+    const room = rooms[roomId];
+    if (!room || room.started) return;
+
+    // 残りの枠をCPUで埋める
+    const currentCount = room.players.length;
+    for (let i = currentCount; i < 4; i++) {
+      room.players.push({
+        id: `CPU_${i}`,
+        name: `CPU ${i}`,
+        seat: i,
+        isCpu: true
+      });
+    }
+
+    startMatch(roomId);
+  });
+
+  // 打牌・アクション同期
+  socket.on('playerAction', ({ roomId, actionData }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+
+    // 部屋内の全員にアクションをブロードキャスト
+    io.to(roomId).emit('gameAction', actionData);
+    
+    // ターンの進行とタイマーのリセット
+    if (actionData.type === 'discard' || actionData.type === 'nextTurn') {
+      resetTurnTimer(roomId, actionData.nextTurn);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    for (const rId in rooms) {
+      const room = rooms[rId];
+      const pIndex = room.players.findIndex(p => p.id === socket.id);
+      if (pIndex !== -1) {
+        if (!room.started) {
+          room.players.splice(pIndex, 1);
+          // 席番号の再割り振り
+          room.players.forEach((p, idx) => p.seat = idx);
+          io.to(rId).emit('roomUpdate', {
+            playerCount: room.players.length,
+            players: room.players
+          });
+        } else {
+          // 対局中の切断時はCPUに置き換え
+          room.players[pIndex].isCpu = true;
+          room.players[pIndex].name += '(切断/CPU)';
+          io.to(rId).emit('playerDisconnected', { seat: pIndex });
+        }
+      }
+      if (room.players.filter(p => !p.isCpu).length === 0) {
+        if (room.timer) clearInterval(room.timer);
+        delete rooms[rId];
+      }
+    }
+  });
+});
+
+function startMatch(roomId) {
+  const room = rooms[roomId];
+  room.started = true;
+
+  io.to(roomId).emit('gameStart', {
+    players: room.players,
+    seed: Math.floor(Math.random() * 100000) // 共通乱数シード（山札同期用）
+  });
+
+  resetTurnTimer(roomId, 0);
+}
+
+// 1手1分のタイマー処理
+function resetTurnTimer(roomId, currentTurn) {
+  const room = rooms[roomId];
+  if (!room) return;
+
+  if (room.timer) clearInterval(room.timer);
+  room.currentTurn = currentTurn;
+
+  let timeLeft = 60; // 持ち時間1分 (60秒)
+  io.to(roomId).emit('timerUpdate', { timeLeft, turn: currentTurn });
+
+  room.timer = setInterval(() => {
+    timeLeft--;
+    io.to(roomId).emit('timerUpdate', { timeLeft, turn: currentTurn });
+
+    if (timeLeft <= 0) {
+      clearInterval(room.timer);
+      // 時間切れ時の自動ツモ切り指示
+      io.to(roomId).emit('timeOut', { turn: currentTurn });
+    }
+  }, 1000);
+}
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`麻雀オンラインサーバー稼働中: Port ${PORT}`));
