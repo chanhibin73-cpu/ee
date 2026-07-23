@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>4人麻雀 (東風荘・オンライン対戦版)</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: sans-serif; background-color: #111; color: #fff; display: flex; justify-content: center; align-items: center; width: 100vw; height: 100vh; }
+    #app-container { position: relative; width: 90vw; height: 90vw; max-width: 500px; max-height: 500px; background: #1f6036; border: 2px solid #000; border-radius: 8px; overflow: hidden; }
+    
+    .screen { position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; background: rgba(0,0,0,0.85); padding: 20px; z-index: 10; }
+    input { padding: 8px; font-size: 1rem; margin: 8px 0; width: 80%; text-align: center; }
+    button { padding: 10px 20px; font-size: 1rem; font-weight: bold; background: #e63946; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    
+    #timer-display { font-size: 1.2rem; color: #ffd700; font-weight: bold; margin-top: 5px; }
+    .status-text { margin-bottom: 15px; font-size: 1.1rem; }
+  </style>
+</head>
+<body>
+
+  <div id="app-container">
+    <!-- オンラインルーム接続画面 -->
+    <div id="online-menu" class="screen">
+      <h2>東風荘 オンライン対戦</h2>
+      <input type="text" id="player-name-input" placeholder="プレイヤー名を入力" value="名無し">
+      <input type="text" id="room-id-input" placeholder="部屋番号を入力 (例: 1234)">
+      <button onclick="joinOnlineRoom()">部屋に入る</button>
+    </div>
+
+    <!-- 4人待機画面 -->
+    <div id="waiting-screen" class="screen" style="display: none;">
+      <h2>マッチング待機中...</h2>
+      <div class="status-text">部屋番号: <span id="current-room-id"></span></div>
+      <div class="status-text">参加人数: <span id="player-count">1</span> / 4 人</div>
+      <div id="player-list" style="font-size: 0.9rem; color: #ccc;"></div>
+    </div>
+
+    <!-- 卓表示エリア -->
+    <div id="game-board" style="display: none; width: 100%; height: 100%; position: relative;">
+      <div style="position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.6); padding: 5px; border-radius: 4px;">
+        <div>東風戦</div>
+        <div>残り持ち時間: <span id="timer-display">60</span>秒</div>
+      </div>
+      <div id="status-message" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center;">
+        対局開始！
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const socket = io();
+    let mySeat = -1;
+    let myRoomId = '';
+
+    function joinOnlineRoom() {
+      const name = document.getElementById('player-name-input').value.trim();
+      const roomId = document.getElementById('room-id-input').value.trim();
+
+      if (!roomId) {
+        alert('部屋番号を入力してください');
+        return;
+      }
+
+      myRoomId = roomId;
+      socket.emit('joinRoom', { roomId, playerName: name });
+
+      document.getElementById('online-menu').style.display = 'none';
+      document.getElementById('waiting-screen').style.display = 'flex';
+      document.getElementById('current-room-id').textContent = roomId;
+    }
+
+    // 席割り当てを受信
+    socket.on('assignedSeat', (data) => {
+      mySeat = data.seat;
+    });
+
+    // 部屋の待機人数更新を受信
+    socket.on('roomUpdate', (data) => {
+      document.getElementById('player-count').textContent = data.playerCount;
+      document.getElementById('player-list').innerHTML = data.players.map(p => `<div>・ ${p}</div>`).join('');
+    });
+
+    // 部屋が満員の場合
+    socket.on('roomFull', () => {
+      alert('その部屋はすでに満員か、対局が開始されています。');
+      location.reload();
+    });
+
+    // 4人揃ってゲーム開始
+    socket.on('gameStart', (data) => {
+      document.getElementById('waiting-screen').style.display = 'none';
+      document.getElementById('game-board').style.display = 'block';
+      document.getElementById('status-message').textContent = '東風戦 開始！';
+    });
+
+    // タイマー更新の受信
+    socket.on('timerUpdate', (data) => {
+      document.getElementById('timer-display').textContent = data.timeLeft;
+      
+      if (data.turn === mySeat) {
+        document.getElementById('status-message').textContent = 'あなたの番です！';
+      } else {
+        document.getElementById('status-message').textContent = `プレイヤー${data.turn + 1} の思考中...`;
+      }
+    });
+
+    // 盤面更新を受信
+    socket.on('gameStateUpdate', (data) => {
+      if (data.timeOutDiscard) {
+        console.log('時間切れのため自動切算が行われました。');
+      }
+    });
+  </script>
+</body>
+</html>
